@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"fmt"
+	"sort"
 
 	// checksums
 	"crypto/sha256"
@@ -20,13 +21,14 @@ import (
 	"time"
 
 	// encryption
-	//"crypto/aes"
-	//"crypto/cipher"
+	"crypto/aes"
+	"crypto/cipher"
 )
 
 var debug *bool = flag.Bool("debug", false, "enable debug logging")
 var flagsource *string = flag.String("source", "", "Source directory or file")
 var flagdestination *string = flag.String("destination", "", "Destination directory or file")
+var noencrypt *bool = flag.Bool("noencrypt", false, "do not encrypt destination")
 
 type File struct {
 	PrettyPath string
@@ -44,6 +46,7 @@ func main() {
 	Debug("debug:", *debug)
 	Debug("flagsource:", *flagsource)
 	Debug("flagdestination:", *flagdestination)
+	Debug("noencrypt:", *noencrypt)
 
 	// First element of tail is the action
 	if len(flag.Args()) < 1 {
@@ -61,7 +64,12 @@ func main() {
 		// Prepare destination
 		destination := normalizePath(flag.Args()[1])
 		if PathIsDirectory(destination) {
-			destination = destination + "/destFile" // TODO
+			if *noencrypt {
+				destination = destination + "/destFile.tar.gz" // TODO
+			} else {
+				destination = destination + "/destFile.tar.gz.crypt" // TODO
+			}
+			
 		}
 		if FileExists(destination) {
 			//log.Fatal("Destination \"", destination, "\" does already exist. Aborting.") // TODO
@@ -85,8 +93,10 @@ func main() {
 		if destination == "" {
 			destination = normalizePath(".")
 		}
-		if PathIsDirectory(destination) {
-			destination = destination + "/destFile" // TODO
+		if *noencrypt {
+			destination = destination + "/destFile.tar.gz" // TODO
+		} else {
+			destination = destination + "/destFile.tar.gz.crypt" // TODO
 		}
 		if FileExists(destination) {
 			//log.Fatal("Destination \"", destination, "\" does already exist. Aborting.") // TODO
@@ -96,7 +106,7 @@ func main() {
 		// Prepare sources
 		sources := normalizePaths(flag.Args()[1:])
 		sources = AddRecursively(sources)
-		Debug("Final sources:", sources)
+		//Debug("Final sources:", sources)
 
 		// Start
 		encrypt(sources, destination)
@@ -119,7 +129,7 @@ func encrypt(files []string, destination string) {
 
 	Debug("ENCRYPTING")
 	Debug("number of files:", len(files))
-	Debug("files:", files)
+	//Debug("files:", files)
 	Debug("destination:", destination)
 
 	// Calculate common prefix for all given files
@@ -133,6 +143,8 @@ func encrypt(files []string, destination string) {
 	// Create map with full and relative file name and checksum
 	fileMap := make(map[string]File)
 
+	Error(files[1])
+
 	for _, filename := range files {
 		file := File{}
 		relPath, err := filepath.Rel(commonPath, filename)
@@ -143,33 +155,64 @@ func encrypt(files []string, destination string) {
 		fileMap[filename] = file
 	}
 
-	tarfile, err := os.Create(destination)
-	defer tarfile.Close()
+	destFile, err := os.Create(destination)
+	defer destFile.Close()
 	checkerror(err)
 
-/*
-	key := []byte("example key 1234")
+	var fileWriter io.WriteCloser
+	var tarfileWriter *tar.Writer
 
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		panic(err)
+	if ! *noencrypt {
+
+		key := []byte("example key 1234")
+
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			panic(err)
+		}
+
+		// TODO: Think about if using no initialization vector
+		// is secure enough. Normally same files and same key
+		// should result in the same destination file imho.
+
+		var iv [aes.BlockSize]byte
+		stream := cipher.NewCTR(block, iv[:]) // TODO: Check security
+
+		cryptWriter := cipher.StreamWriter{S: stream, W: destFile}
+
+		fileWriter = gzip.NewWriter(cryptWriter)
+		defer fileWriter.Close()
+
+		tarfileWriter = tar.NewWriter(fileWriter)
+		defer tarfileWriter.Close()
+
+	} else {
+
+		fileWriter = gzip.NewWriter(destFile)
+		defer fileWriter.Close()
+
+		tarfileWriter = tar.NewWriter(fileWriter)
+		defer tarfileWriter.Close()
 	}
 
-	// If the key is unique for each ciphertext, then it's ok to use a zero
-	// IV.
-	var iv [aes.BlockSize]byte
-	stream := cipher.NewOFB(block, iv[:]) // CTR or CFB
+	// Sort filemap to create the same tar if same files are in it
+	var keys []string
+	for k := range fileMap {
+	    keys = append(keys, k)
+	}
+	sort.Strings(keys)
 
-	cryptor := cipher.StreamWriter{S: stream, W: tarfile}
+	// Create checksumBuf for checksumFile
+	var checksumBuf bytes.Buffer
 
-*/
-	fileWriter := gzip.NewWriter(tarfile)
-	defer fileWriter.Close()
+	for _, filename := range keys {
+		file := fileMap[filename]
 
-	tarfileWriter := tar.NewWriter(fileWriter)
-	defer tarfileWriter.Close()
-
-	for filename, file := range fileMap {
+		// Add file to checksumfile
+		checksumBuf.WriteString(file.Checksum)
+		checksumBuf.WriteString("  ")
+		checksumBuf.WriteString(file.PrettyPath)
+		checksumBuf.WriteString("\n")
 
 		// Get file info
 		fileInfo, err := os.Stat(filename)
@@ -187,7 +230,6 @@ func encrypt(files []string, destination string) {
 		checkerror(err)
 
 		// prepare the tar header
-
 		header := new(tar.Header)
 		header.Name = file.PrettyPath
 		header.Size = fileInfo.Size()
@@ -205,8 +247,7 @@ func encrypt(files []string, destination string) {
 		checkerror(err)
 	}
 
-	// Create checksumFileString
-	checksumFileString := createChecksumString(fileMap)
+	checksumFileString := checksumBuf.String()
 
 	// Add file with checksums to tar
 	// TODO: Calculation of checksums could be parallelized to tar-creation
@@ -221,8 +262,6 @@ func encrypt(files []string, destination string) {
 
 	_, err = io.WriteString(tarfileWriter, checksumFileString)
 	checkerror(err)
-
-
 
 }
 
@@ -319,20 +358,6 @@ func calculateChecksum(filename string) string {
 	}
 
 	return hex.EncodeToString(hasher.Sum(nil))
-}
-
-func createChecksumString(fileMap map[string]File) string {
-	var buffer bytes.Buffer
-
-	// Calculate checksum for every file
-	for _, file := range fileMap {
-		buffer.WriteString(file.Checksum)
-		buffer.WriteString("  ")
-		buffer.WriteString(file.PrettyPath)
-		buffer.WriteString("\n")
-	}
-
-	return buffer.String()
 }
 
 func Debug(args ...interface{}) {
