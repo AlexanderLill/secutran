@@ -20,8 +20,8 @@ import (
 	"time"
 
 	// encryption
-	"crypto/aes"
-	"crypto/cipher"
+	//"crypto/aes"
+	//"crypto/cipher"
 )
 
 var debug *bool = flag.Bool("debug", false, "enable debug logging")
@@ -31,6 +31,10 @@ var flagdestination *string = flag.String("destination", "", "Destination direct
 type File struct {
 	PrettyPath string
 	Checksum string
+}
+
+func (f File) toString() string {
+	return f.PrettyPath + " " + f.Checksum
 }
 
 func main() {
@@ -131,7 +135,9 @@ func encrypt(files []string, destination string) {
 
 	for _, filename := range files {
 		file := File{}
-		file.PrettyPath, _ = filepath.Rel(commonPath, filename)
+		relPath, err := filepath.Rel(commonPath, filename)
+		checkerror(err)
+		file.PrettyPath = relPath
 		file.Checksum = calculateChecksum(filename)
 
 		fileMap[filename] = file
@@ -141,12 +147,7 @@ func encrypt(files []string, destination string) {
 	defer tarfile.Close()
 	checkerror(err)
 
-
-
-
-
-
-
+/*
 	key := []byte("example key 1234")
 
 	block, err := aes.NewCipher(key)
@@ -157,18 +158,18 @@ func encrypt(files []string, destination string) {
 	// If the key is unique for each ciphertext, then it's ok to use a zero
 	// IV.
 	var iv [aes.BlockSize]byte
-	stream := cipher.NewOFB(block, iv[:])
+	stream := cipher.NewOFB(block, iv[:]) // CTR or CFB
 
 	cryptor := cipher.StreamWriter{S: stream, W: tarfile}
 
-
-	fileWriter := gzip.NewWriter(cryptor)
+*/
+	fileWriter := gzip.NewWriter(tarfile)
 	defer fileWriter.Close()
 
 	tarfileWriter := tar.NewWriter(fileWriter)
 	defer tarfileWriter.Close()
 
-	for _, filename := range files {
+	for filename, file := range fileMap {
 
 		// Get file info
 		fileInfo, err := os.Stat(filename)
@@ -180,24 +181,27 @@ func encrypt(files []string, destination string) {
 			continue
 		}
 
-		file, err := os.Open(filename)
-		defer file.Close()
+		Error(file.toString())
+		fileHandle, err := os.Open(filename)
+		defer fileHandle.Close()
 		checkerror(err)
 
 		// prepare the tar header
 
 		header := new(tar.Header)
-		str, _ := filepath.Rel(commonPath, file.Name())
-		header.Name = str
-		Debug("file.name:", str)
+		header.Name = file.PrettyPath
 		header.Size = fileInfo.Size()
 		header.Mode = int64(fileInfo.Mode())
 		header.ModTime = fileInfo.ModTime()
 
 		err = tarfileWriter.WriteHeader(header)
+		Debug(header.Name)
+		Debug(header.Size)
+		Debug(header.Mode)
+		Debug(header.ModTime)
 		checkerror(err)
 
-		_, err = io.Copy(tarfileWriter, file)
+		_, err = io.Copy(tarfileWriter, fileHandle)
 		checkerror(err)
 	}
 
