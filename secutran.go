@@ -25,7 +25,8 @@ import (
 	"crypto/cipher"
 )
 
-var debug *bool = flag.Bool("debug", false, "enable debug logging")
+var debug *bool = flag.Bool("vv", false, "debugging output")
+var verbose *bool = flag.Bool("v", false, "verbose output")
 var flagsource *string = flag.String("source", "", "Source directory or file")
 var flagdestination *string = flag.String("destination", "", "Destination directory or file")
 var noencrypt *bool = flag.Bool("noencrypt", false, "do not encrypt destination")
@@ -35,8 +36,8 @@ type File struct {
 	Checksum string
 }
 
-func (f File) toString() string {
-	return f.PrettyPath + " " + f.Checksum
+func (f File) String() string {
+	return "PrettyPath=" + f.PrettyPath + " - Checksum=" + f.Checksum
 }
 
 func main() {
@@ -59,7 +60,8 @@ func main() {
 
 	// Choose what is to do
 	switch action {
-	case "encryptto": //secutran encryptto <dest> <source, source, source>
+	case "encryptto":
+		//secutran encryptto <dest> <source, source, source>
 
 		// Prepare destination
 		destination := normalizePath(flag.Args()[1])
@@ -106,7 +108,7 @@ func main() {
 		// Prepare sources
 		sources := normalizePaths(flag.Args()[1:])
 		sources = AddRecursively(sources)
-		//Debug("Final sources:", sources)
+		Debug("Final sources:", sources)
 
 		// Start
 		encrypt(sources, destination)
@@ -128,22 +130,18 @@ func main() {
 func encrypt(files []string, destination string) {
 
 	Debug("ENCRYPTING")
-	Debug("number of files:", len(files))
-	//Debug("files:", files)
 	Debug("destination:", destination)
 
 	// Calculate common prefix for all given files
 	commonPath := CommonPrefix(os.PathSeparator, files...)
 	if commonPath == "" {
-		fmt.Println("No common path")
+		Debug("No common path")
 	} else {
-		fmt.Println("Common path:", commonPath)
+		Debug("Common path:", commonPath)
 	}
 
 	// Create map with full and relative file name and checksum
 	fileMap := make(map[string]File)
-
-	Error(files[1])
 
 	for _, filename := range files {
 		file := File{}
@@ -224,7 +222,7 @@ func encrypt(files []string, destination string) {
 			continue
 		}
 
-		Error(file.toString())
+		Verbose("Adding " + file.PrettyPath + " ...")
 		fileHandle, err := os.Open(filename)
 		defer fileHandle.Close()
 		checkerror(err)
@@ -237,16 +235,15 @@ func encrypt(files []string, destination string) {
 		header.ModTime = fileInfo.ModTime()
 
 		err = tarfileWriter.WriteHeader(header)
-		Debug(header.Name)
-		Debug(header.Size)
-		Debug(header.Mode)
-		Debug(header.ModTime)
 		checkerror(err)
 
 		_, err = io.Copy(tarfileWriter, fileHandle)
 		checkerror(err)
+
+		Debug("... done.")
 	}
 
+	Verbose("Adding checksums.sha256")
 	checksumFileString := checksumBuf.String()
 
 	// Add file with checksums to tar
@@ -263,6 +260,8 @@ func encrypt(files []string, destination string) {
 	_, err = io.WriteString(tarfileWriter, checksumFileString)
 	checkerror(err)
 
+	Debug("... done.")
+
 }
 
 func checkerror(err error) {
@@ -275,6 +274,7 @@ func checkerror(err error) {
 func normalizePath(filename string) string {
 	return filepath.Clean(filename)
 }
+
 
 func normalizePaths(filenames []string) []string {
 	var absPaths []string
@@ -309,12 +309,11 @@ func PathIsDirectory(path string) bool {
 	}
 }
 
-func AddRecursively(paths []string) []string {
-	var allPaths []string
+func AddRecursively(paths []string) (recursivePaths []string) {
 
 	walkFcn := func(path string, fi os.FileInfo, err error) error {
 		if !fi.IsDir() {
-			allPaths = append(allPaths, path)
+			recursivePaths = append(recursivePaths, path)
 		}
 		return nil
 	}
@@ -330,11 +329,11 @@ func AddRecursively(paths []string) []string {
 			}
 		} else {
 			Debug("This is a file. Just add it.")
-			allPaths = append(allPaths, path)
+			recursivePaths = append(recursivePaths, path)
 		}
 	}
 
-	return allPaths
+	return
 }
 
 func FileExists(file string) bool {
@@ -358,6 +357,12 @@ func calculateChecksum(filename string) string {
 	}
 
 	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func Verbose(args ...interface{}) {
+	if *verbose || *debug {
+		log.Print(args)
+	}
 }
 
 func Debug(args ...interface{}) {
