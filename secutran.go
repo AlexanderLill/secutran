@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"fmt"
-	"sort"
 
 	// checksums
 	"crypto/sha256"
@@ -25,93 +24,92 @@ import (
 	"crypto/cipher"
 )
 
-var debug *bool = flag.Bool("vv", false, "debugging output")
-var verbose *bool = flag.Bool("v", false, "verbose output")
-var flagsource *string = flag.String("source", "", "Source directory or file")
-var flagdestination *string = flag.String("destination", "", "Destination directory or file")
-var noencrypt *bool = flag.Bool("noencrypt", false, "do not encrypt destination")
+var isVerbose *bool = flag.Bool("v", false, "Verbose output")
+var isDebug *bool = flag.Bool("vv", false, "Debugging output")
+var flagSource *string = flag.String("source", "", "Source directory or file")
+var flagDestination *string = flag.String("destination", "", "Destination directory or file")
+var noEncrypt *bool = flag.Bool("noencrypt", false, "Do not encrypt destination")
+var overwriteDest *bool = flag.Bool("overwrite", false, "Overwrite destination if it exists")
+var useOriginal *bool = flag.Bool("original", false, "Use original paths inside archive instead of possible relative paths")
 
-type File struct {
-	PrettyPath string
+type SourceFile struct {
+	OriginalPath string
+	RelativePath string
 	Checksum string
 }
 
-func (f File) String() string {
-	return "PrettyPath=" + f.PrettyPath + " - Checksum=" + f.Checksum
+func (f SourceFile) String() string {
+	return "File - RelativePath=" + f.RelativePath + "\n" +
+ 		   "Checksum=" + f.Checksum + "\n"
 }
 
 func main() {
 
 	// Parse the command line options
 	flag.Parse()
-	Debug("debug:", *debug)
-	Debug("flagsource:", *flagsource)
-	Debug("flagdestination:", *flagdestination)
-	Debug("noencrypt:", *noencrypt)
+	Verbose("isVerbose:", *isVerbose)
+	Debug("isDebug:", *isDebug)
+	Debug("flagSource:", *flagSource)
+	Debug("flagDestination:", *flagDestination)
+	Verbose("noEncrypt:", *noEncrypt)
 
-	// First element of tail is the action
-	if len(flag.Args()) < 1 {
+	// Check if arguments are provided
+	if len(flag.Args()) == 0 {
 		log.Fatal("Action not specified! See \"", filepath.Base(os.Args[0]), " -h\"")
 	}
 
+	// Action is first argument
+	Debug("arguments:", flag.Args())
 	action := flag.Args()[0]
 	Debug("action:", action)
-	Debug("tail:", flag.Args())
 
 	// Choose what is to do
 	switch action {
 	case "encryptto":
 		//secutran encryptto <dest> <source, source, source>
 
-		// Prepare destination
-		destination := normalizePath(flag.Args()[1])
-		if PathIsDirectory(destination) {
-			if *noencrypt {
-				destination = destination + "/destFile.tar.gz" // TODO
-			} else {
-				destination = destination + "/destFile.tar.gz.crypt" // TODO
-			}
-			
-		}
-		if FileExists(destination) {
-			//log.Fatal("Destination \"", destination, "\" does already exist. Aborting.") // TODO
-		}
-		Debug("Final destination:", destination)
+		// Get destination
+		destination := flag.Args()[1]
+		Debug("rawdestination:", destination)
+		destFile := getDestinationFile(destination)
+		Verbose("destFile:", destFile)
 
-		// Prepare sources
-		sources := normalizePaths(flag.Args()[2:])
-		sources = AddRecursively(sources)
-		Debug("Final sources:", sources)
+		// Get sources
+		sources := flag.Args()[2:]
+		Debug("rawsources:", sources)
+		sourceFiles := getSourceFiles(sources)
+		Debug("sourceFiles:", sourceFiles)
 
 		// Start
-		encrypt(sources, destination)
+		encrypt(sourceFiles, destFile)
 
 	case "encrypt":
 		//secutran encrypt <source, source, source> (dest = workingdir)
 		//secutran encrypt --destination=<dest> <source, source, source>
 
-		// Prepare destination
-		destination := normalizePath(*flagdestination)
-		if destination == "" {
-			destination = normalizePath(".")
-		}
-		if *noencrypt {
-			destination = destination + "/destFile.tar.gz" // TODO
+		// Get destination
+		var destination string
+		if *flagDestination == "" {
+			dest, err := os.Getwd()
+			if err != nil {
+				log.Fatal("Could not get current working directory:", err)
+			}
+			destination = dest
 		} else {
-			destination = destination + "/destFile.tar.gz.crypt" // TODO
+			destination = *flagDestination
 		}
-		if FileExists(destination) {
-			//log.Fatal("Destination \"", destination, "\" does already exist. Aborting.") // TODO
-		}
-		Debug("Final destination:", destination)
+		Debug("rawdestination:", destination)
+		destFile := getDestinationFile(destination)
+		Verbose("destFile:", destFile)
 
-		// Prepare sources
-		sources := normalizePaths(flag.Args()[1:])
-		sources = AddRecursively(sources)
-		Debug("Final sources:", sources)
+		// Get sources
+		sources := flag.Args()[1:]
+		Debug("rawsources:", sources)
+		sourceFiles := getSourceFiles(sources)
+		Debug("sourceFiles:", sourceFiles)
 
 		// Start
-		encrypt(sources, destination)
+		encrypt(sourceFiles, destFile)
 
 	case "decryptto":
 		//secutran decryptto <dest> <source>
@@ -127,40 +125,108 @@ func main() {
 	}
 }
 
-func encrypt(files []string, destination string) {
+func getDestinationFile(destination string) (destFile string) {
 
-	Debug("ENCRYPTING")
-	Debug("destination:", destination)
+	destFile = filepath.Clean(destination)
 
-	// Calculate common prefix for all given files
-	commonPath := CommonPrefix(os.PathSeparator, files...)
-	if commonPath == "" {
-		Debug("No common path")
+	// If path is directory, create filename
+	if pathIsDirectory(destFile) {
+		if *noEncrypt {
+			destFile = destFile + "/destFile.tar.gz" // TODO
+		} else {
+			destFile = destFile + "/destFile.tar.gz.crypt" // TODO
+		}
+		Debug("Destination is a directory. Created filename:", destFile)
+	}
+
+	// Check if file exists
+	if fileExists(destFile) {
+		if *overwriteDest {
+			Debug("Destination exists. Overwriting ", destFile)
+		} else {
+			log.Fatal("Destination \"", destFile, "\" does already exist. Aborting. (Try -overwrite to ignore existing destination files.)")
+		}
+	}
+
+	return
+}
+
+func getSourceFiles(sources []string) (sourceFiles []SourceFile) {
+	for _, source := range sources {
+		sourceFiles = append(sourceFiles, getFilesRecursively(source)...)
+	}
+	return
+}
+
+func getFilesRecursively(source string) (sourceFiles []SourceFile) {
+	walkFcn := func(path string, fi os.FileInfo, err error) error {
+		if !fi.IsDir() {
+			sourceFiles = append(sourceFiles, SourceFile{OriginalPath: path, RelativePath: path})
+		}
+		return nil
+	}
+
+	source = filepath.Clean(source)
+
+	// Check if source is a directory
+	if pathIsDirectory(source) {
+		Debug("Going into directory", source)
+		err := filepath.Walk(source, walkFcn)
+		if err != nil {
+			Error("Could not obtain all files in ", source)
+		}
 	} else {
+		Debug("Adding file", source)
+		sourceFiles = append(sourceFiles, SourceFile{OriginalPath: source, RelativePath: source})
+	}
+
+	return
+}
+
+func encrypt(files []SourceFile, destination string) {
+
+	// Check if archive should use smallest possible hierarchy
+	if ! *useOriginal {
+
+		// Get all source files to determine common path
+		var filesStrings []string
+		for _, file := range files {
+			filesStrings = append(filesStrings, file.OriginalPath)
+		}
+
+		// Get common path
+		commonPath := commonPrefix(os.PathSeparator, filesStrings...)
 		Debug("Common path:", commonPath)
+
+		// Initialize field "RelativePath" for every file
+		for id, file := range files {
+			relPath, err := filepath.Rel(commonPath, file.OriginalPath)
+			if err != nil {
+				Error("Could not get relative path for file", file.OriginalPath, ":", err)
+				relPath = file.OriginalPath
+			}
+
+			Debug("Relative path: ", relPath)
+			files[id].RelativePath = relPath
+		}
+	}
+	
+	// Initialize all checksums
+	for id, file := range files {
+		files[id].Checksum = calculateChecksum(file.OriginalPath)
 	}
 
-	// Create map with full and relative file name and checksum
-	fileMap := make(map[string]File)
-
-	for _, filename := range files {
-		file := File{}
-		relPath, err := filepath.Rel(commonPath, filename)
-		checkerror(err)
-		file.PrettyPath = relPath
-		file.Checksum = calculateChecksum(filename)
-
-		fileMap[filename] = file
-	}
-
+	// Create destination file
 	destFile, err := os.Create(destination)
 	defer destFile.Close()
 	checkerror(err)
 
-	var fileWriter io.WriteCloser
-	var tarfileWriter *tar.Writer
+	// Create writers
+	var zipWriter io.WriteCloser
+	var tarWriter *tar.Writer
 
-	if ! *noencrypt {
+	// Check if we encrypt
+	if ! *noEncrypt {
 
 		key := []byte("example key 1234")
 
@@ -170,81 +236,77 @@ func encrypt(files []string, destination string) {
 		}
 
 		// TODO: Think about if using no initialization vector
-		// is secure enough. Normally same files and same key
-		// should result in the same destination file imho.
+		// is secure enough. (But normally same files and same
+		// key should result in the same destination file imho.)
 
 		var iv [aes.BlockSize]byte
-		stream := cipher.NewCTR(block, iv[:]) // TODO: Check security
+		stream := cipher.NewCTR(block, iv[:])
 
+		// Writes to cryptWriter are encrypted and written to destFile
 		cryptWriter := cipher.StreamWriter{S: stream, W: destFile}
 
-		fileWriter = gzip.NewWriter(cryptWriter)
-		defer fileWriter.Close()
+		// Writes to zipWriter are zipped and written to cryptWriter
+		zipWriter = gzip.NewWriter(cryptWriter)
+		defer zipWriter.Close()
 
-		tarfileWriter = tar.NewWriter(fileWriter)
-		defer tarfileWriter.Close()
+		// Writes to tarWriter are tarred and written to zipWriter
+		tarWriter = tar.NewWriter(zipWriter)
+		defer tarWriter.Close()
 
 	} else {
 
-		fileWriter = gzip.NewWriter(destFile)
-		defer fileWriter.Close()
+		// Writes to zipWriter are zipped and written to destFile
+		zipWriter = gzip.NewWriter(destFile)
+		defer zipWriter.Close()
 
-		tarfileWriter = tar.NewWriter(fileWriter)
-		defer tarfileWriter.Close()
+		// Writes to tarWriter are tarred and written to zipWriter
+		tarWriter = tar.NewWriter(zipWriter)
+		defer tarWriter.Close()
 	}
 
-	// Sort filemap to create the same tar if same files are in it
-	var keys []string
-	for k := range fileMap {
-	    keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	// Create buffer for file with checksums
+	var checksumFileBuf bytes.Buffer
 
-	// Create checksumBuf for checksumFile
-	var checksumBuf bytes.Buffer
-
-	for _, filename := range keys {
-		file := fileMap[filename]
+	// Iterate over all source files
+	for _, file := range files {
 
 		// Add file to checksumfile
-		checksumBuf.WriteString(file.Checksum)
-		checksumBuf.WriteString("  ")
-		checksumBuf.WriteString(file.PrettyPath)
-		checksumBuf.WriteString("\n")
+		checksumFileBuf.WriteString(file.Checksum)
+		checksumFileBuf.WriteString("  ")
+		checksumFileBuf.WriteString(file.RelativePath)
+		checksumFileBuf.WriteString("\n")
 
 		// Get file info
-		fileInfo, err := os.Stat(filename)
+		fileInfo, err := os.Stat(file.OriginalPath)
 		if err != nil {
-			log.Fatal("Could not retrieve file info for file ", filename)
+			log.Fatal("Could not retrieve file info for file ", file.OriginalPath)
 		}
 
 		if fileInfo.IsDir() {
 			continue
 		}
 
-		Verbose("Adding " + file.PrettyPath + " ...")
-		fileHandle, err := os.Open(filename)
+		Verbose("Adding " + file.RelativePath + " ...")
+		fileHandle, err := os.Open(file.OriginalPath)
 		defer fileHandle.Close()
 		checkerror(err)
 
 		// prepare the tar header
 		header := new(tar.Header)
-		header.Name = file.PrettyPath
+		header.Name = file.RelativePath
 		header.Size = fileInfo.Size()
 		header.Mode = int64(fileInfo.Mode())
 		header.ModTime = fileInfo.ModTime()
 
-		err = tarfileWriter.WriteHeader(header)
+		err = tarWriter.WriteHeader(header)
 		checkerror(err)
 
-		_, err = io.Copy(tarfileWriter, fileHandle)
+		_, err = io.Copy(tarWriter, fileHandle)
 		checkerror(err)
-
-		Debug("... done.")
 	}
 
-	Verbose("Adding checksums.sha256")
-	checksumFileString := checksumBuf.String()
+	Verbose("Adding checksums.sha256 ...")
+	checksumFileString := checksumFileBuf.String()
 
 	// Add file with checksums to tar
 	// TODO: Calculation of checksums could be parallelized to tar-creation
@@ -254,14 +316,13 @@ func encrypt(files []string, destination string) {
 	checksumHeader.Mode = int64(0644)
 	checksumHeader.ModTime = time.Now()
 
-	err = tarfileWriter.WriteHeader(checksumHeader)
+	err = tarWriter.WriteHeader(checksumHeader)
 	checkerror(err)
 
-	_, err = io.WriteString(tarfileWriter, checksumFileString)
+	_, err = io.WriteString(tarWriter, checksumFileString)
 	checkerror(err)
 
-	Debug("... done.")
-
+	Verbose("All done!")
 }
 
 func checkerror(err error) {
@@ -271,76 +332,34 @@ func checkerror(err error) {
 	}
 }
 
-func normalizePath(filename string) string {
-	return filepath.Clean(filename)
-}
+func pathIsDirectory(path string) bool {
 
-
-func normalizePaths(filenames []string) []string {
-	var absPaths []string
-
-	// Get absolute path for every filename and add to result
-	for _, filename := range filenames {
-		// Get absolute path for each file
-		absPaths = append(absPaths, normalizePath(filename))
-	}
-
-	return absPaths
-}
-
-func PathIsDirectory(path string) bool {
-
-	// Check if destination is a file or a directory
 	fileInfo, err := os.Stat(path)
 
 	if err != nil {
 		// Path is no file or directory
-		Debug("Path is no file or directory")
+		Debug("Path is no file or directory:", path)
 		return false
 	} else {
 		if fileInfo.IsDir() {
 			// Path is a directory
-			Debug("Path is a directory")
+			Debug("Path is a directory:", path)
 			return true
 		} else {
 			// Path is a file
+			Debug("Path is a file:", path)
 			return false
 		}
 	}
 }
 
-func AddRecursively(paths []string) (recursivePaths []string) {
-
-	walkFcn := func(path string, fi os.FileInfo, err error) error {
-		if !fi.IsDir() {
-			recursivePaths = append(recursivePaths, path)
-		}
-		return nil
-	}
-
-	// Iterate over all given paths
-	for _, path := range paths {
-		// Check if path is a directory
-		if PathIsDirectory(path) {
-			Debug("Directory", path, "found - let's go in.")
-			err := filepath.Walk(path, walkFcn)
-			if err != nil {
-				Error("Could not obtain all files in ", path)
-			}
-		} else {
-			Debug("This is a file. Just add it.")
-			recursivePaths = append(recursivePaths, path)
-		}
-	}
-
-	return
-}
-
-func FileExists(file string) bool {
+func fileExists(file string) bool {
 	_, err := os.Stat(file)
 	if os.IsNotExist(err) {
+		Debug("File does not exist:", file)
 		return false
 	}
+	Debug("File exists:", file)
 	return true
 }
 
@@ -360,14 +379,14 @@ func calculateChecksum(filename string) string {
 }
 
 func Verbose(args ...interface{}) {
-	if *verbose || *debug {
+	if *isVerbose || *isDebug {
 		log.Print(args)
 	}
 }
 
 func Debug(args ...interface{}) {
-	if *debug {
-		log.Printf("DEBUG %v", args)
+	if *isDebug {
+		log.Printf("debug %v", args)
 	}
 }
 
@@ -375,7 +394,7 @@ func Error(args ...interface{}) {
 	log.Printf("ERROR %v", args)
 }
 
-func CommonPrefix(sep byte, paths ...string) string {
+func commonPrefix(sep byte, paths ...string) string {
 
 	// Thanks to http://rosettacode.org/wiki/Find_common_directory_path#Go
 
